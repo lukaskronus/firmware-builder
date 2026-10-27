@@ -1,0 +1,223 @@
+// SPDX-License-Identifier: GPL-2.0-or-later OR MIT
+/*
+ * FPT A312, a headless Hi3798MV100 board.
+ *
+ * This is an EC6108V9C-class design.  The SoC clock tree, pinctrl ranges and
+ * peripheral nodes come from hi3798mv100.dtsi, so the eMMC, Ethernet and USB
+ * clocks are the named CRG clocks instead of the vendor DTB's unrelated
+ * numeric IDs.
+ *
+ * The eMMC stays at the conservative 52 MHz high-speed timing used by the
+ * board's existing firmware.  Do not enable HS200/DDR here until the board
+ * has been tested at that speed.
+ */
+
+/dts-v1/;
+
+#include <dt-bindings/gpio/gpio.h>
+#include "hi3798mv100.dtsi"
+
+/ {
+	model = "FPT A312 custom";
+	compatible = "hisilicon,hi3798mv100-a312", "hisilicon,hi3798mv100";
+
+	aliases {
+		serial0 = &uart0;
+	};
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+	};
+
+	leds {
+		compatible = "gpio-leds";
+
+		network {
+			label = "green:network";
+			gpios = <&gpio0 4 GPIO_ACTIVE_HIGH>;
+			default-state = "off";
+		};
+
+		network-activity {
+			label = "red:network";
+			gpios = <&gpio2 2 GPIO_ACTIVE_HIGH>;
+			default-state = "off";
+		};
+
+		ir {
+			label = "green:ir";
+			gpios = <&gpio5 2 GPIO_ACTIVE_HIGH>;
+			panic-indicator;
+			default-state = "off";
+		};
+	};
+
+	thermal-zones {
+		cpu-thermal {
+			polling-delay = <1000>;
+			polling-delay-passive = <1000>;
+			thermal-sensors = <&tsensor>;
+
+			trips {
+				/*
+				 * No cooling device on this board and no cpufreq
+				 * OPP table, so only the critical trip can act.
+				 */
+				critical: critical {
+					temperature = <115000>;
+					hysteresis = <5000>;
+					type = "critical";
+				};
+			};
+		};
+	};
+};
+
+&soc {
+	tsensor: thermal-sensor@8a23028 {
+		compatible = "hisilicon,hi3798mv100-tsensor";
+		/* PMC10 control, PMC12/PMC13 hold the eight samples. */
+		reg = <0x8a23028 0x18>;
+		#thermal-sensor-cells = <0>;
+		status = "okay";
+	};
+};
+
+&emmc_data {
+	pinctrl-single,bias-pulldown = <
+		PINCTRL_PULLDOWN(0, 1, 0, 1)
+	>;
+	pinctrl-single,slew-rate = <
+		PINCTRL_SLEW_RATE(1, 1)
+	>;
+	pinctrl-single,drive-strength = <
+		PINCTRL_DRV_STRENGTH(6, 7)
+	>;
+};
+
+&emmc_detect {
+	pinctrl-single,bias-pulldown = <
+		PINCTRL_PULLDOWN(0, 1, 0, 1)
+	>;
+	pinctrl-single,slew-rate = <
+		PINCTRL_SLEW_RATE(1, 1)
+	>;
+	pinctrl-single,drive-strength = <
+		PINCTRL_DRV_STRENGTH(3, 3)
+	>;
+};
+
+&emmc_ccmd {
+	pinctrl-single,bias-pullup = <
+		PINCTRL_PULLUP(0, 1, 0, 1)
+	>;
+	pinctrl-single,slew-rate = <
+		PINCTRL_SLEW_RATE(1, 1)
+	>;
+	pinctrl-single,drive-strength = <
+		PINCTRL_DRV_STRENGTH(6, 7)
+	>;
+};
+
+&emmc_cclk_out {
+	pinctrl-single,bias-pulldown = <
+		PINCTRL_PULLDOWN(0, 1, 0, 1)
+	>;
+	pinctrl-single,slew-rate = <
+		PINCTRL_SLEW_RATE(1, 1)
+	>;
+	pinctrl-single,drive-strength = <
+		PINCTRL_DRV_STRENGTH(5, 7)
+	>;
+};
+
+&emmc_rst {
+	pinctrl-single,bias-pullup = <
+		PINCTRL_PULLUP(0, 1, 0, 1)
+	>;
+	pinctrl-single,slew-rate = <
+		PINCTRL_SLEW_RATE(1, 1)
+	>;
+	pinctrl-single,drive-strength = <
+		PINCTRL_DRV_STRENGTH(3, 3)
+	>;
+};
+
+&timer1 {
+	status = "okay";
+};
+
+&uart0 {
+	status = "okay";
+};
+
+&rng {
+	status = "okay";
+};
+
+&gpio0 {
+	status = "okay";
+};
+
+&gpio2 {
+	status = "okay";
+};
+
+&gpio4 {
+	status = "okay";
+};
+
+&gpio5 {
+	status = "okay";
+};
+
+&gpio6 {
+	status = "okay";
+};
+
+&emmc {
+	fifo-depth = <256>;
+	clock-frequency = <100000000>;
+	cap-mmc-highspeed;
+	non-removable;
+	bus-width = <8>;
+	max-frequency = <52000000>;
+	status = "okay";
+};
+
+&eth0 {
+	status = "okay";
+};
+
+&usb2_phy1 {
+	status = "okay";
+};
+
+&usb2_phy2 {
+	status = "okay";
+};
+
+&ohci0 {
+	status = "okay";
+};
+
+&ehci0 {
+	status = "okay";
+};
+
+&ohci1 {
+	status = "okay";
+};
+
+&ehci1 {
+	status = "okay";
+};
+
+&ir {
+	status = "okay";
+};
+
+/* Correct binding, but leave it off until the rootfs is known to pet it. */
+&wdt0 {
+	status = "disabled";
+};

@@ -1,0 +1,33 @@
+diff --git a/drivers/thermal/Kconfig b/drivers/thermal/Kconfig
+index 810eecce..44af0d2b 100644
+--- a/drivers/thermal/Kconfig
++++ b/drivers/thermal/Kconfig
+@@ -263,6 +263,16 @@ config HISI_THERMAL
+ 	  thermal framework. cpufreq is used as the cooling device to throttle
+ 	  CPUs when the passive trip is crossed.
+ 
++config HI3798MV100_THERMAL
++	tristate "HiSilicon Hi3798MV100 thermal sensor"
++	depends on ARCH_HISI || COMPILE_TEST
++	depends on HAS_IOMEM
++	depends on THERMAL_OF
++	help
++	  Support for the temperature sensor in the HiSilicon Hi3798MV100
++	  PMOC block.  The driver reports the SoC temperature to the thermal
++	  framework and supports critical-trip shutdown.
++
+ config IMX_THERMAL
+ 	tristate "Temperature sensor driver for Freescale i.MX SoCs"
+ 	depends on ARCH_MXC || COMPILE_TEST
+diff --git a/drivers/thermal/Makefile b/drivers/thermal/Makefile
+index 3b249195..44078fd1 100644
+--- a/drivers/thermal/Makefile
++++ b/drivers/thermal/Makefile
+@@ -61,6 +61,7 @@ obj-y				+= st/
+ obj-y				+= qcom/
+ obj-y				+= tegra/
+ obj-$(CONFIG_HISI_THERMAL)     += hisi_thermal.o
++obj-$(CONFIG_HI3798MV100_THERMAL) += hi3798mv100_thermal.o
+ obj-y				+= mediatek/
+ obj-$(CONFIG_GENERIC_ADC_THERMAL)	+= thermal-generic-adc.o
+ obj-$(CONFIG_UNIPHIER_THERMAL)	+= uniphier_thermal.o

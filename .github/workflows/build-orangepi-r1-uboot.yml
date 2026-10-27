@@ -1,0 +1,58 @@
+name: Build U-Boot for OrangePi R1
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'userpatches/**'
+
+jobs:
+  build:
+    name: Compile U-Boot
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out your repo
+        uses: actions/checkout@v4
+
+      - name: Clone Armbian build framework
+        run: |
+          git clone --depth=1 https://github.com/armbian/build armbian-build
+
+      - name: Copy userpatches into Armbian build tree
+        run: |
+          mkdir -p armbian-build/userpatches/u-boot/u-boot-sunxi
+          cp -v userpatches/*.patch armbian-build/userpatches/u-boot/u-boot-sunxi/
+          echo "=== Patch files copied ==="
+          ls -la armbian-build/userpatches/u-boot/u-boot-sunxi/
+
+      - name: Fix line endings on patch files
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dos2unix
+          dos2unix armbian-build/userpatches/u-boot/u-boot-sunxi/*.patch
+
+      - name: Compile U-Boot
+        run: |
+          cd armbian-build
+          ./compile.sh uboot \
+          BOARD="orangepi-r1" \
+          BRANCH="current" \
+          RELEASE="trixie" \
+          BUILD_MINIMAL="yes" \
+          BUILD_DESKTOP="no" \
+          KERNEL_CONFIGURE="no" \
+          COMPRESS_OUTPUTIMAGE="no"
+
+      - name: List output directory (debug)
+        if: always()
+        run: |
+          echo "=== Contents of armbian-build/output/debs/ ==="
+          find armbian-build/output/debs/ -type f 2>/dev/null || echo "Directory not found or empty"
+
+      - name: Upload compiled U-Boot as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: u-boot-orangepi-r1
+          path: armbian-build/output/debs/*.deb
+          retention-days: 7

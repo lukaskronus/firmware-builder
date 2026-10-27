@@ -1,0 +1,23 @@
+--- a/arch/arm/dts/sun8i-h2-plus-orangepi-r1.dts
++++ b/arch/arm/dts/sun8i-h2-plus-orangepi-r1.dts
+@@ -98,3 +98,20 @@
+ &usbphy {
+        usb1_vbus-supply = <&reg_vcc_usb_eth>;
+ };
++
++&ehci2 {
++       status = "okay";
++};
++
++&ehci3 {
++       status = "okay";
++};
++
++&ohci2 {
++       status = "okay";
++};
++
++&ohci3 {
++       status = "okay";
++};
++

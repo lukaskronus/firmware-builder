@@ -1,0 +1,52 @@
+From b45f30c8e539c42bd663f6dc05beeed5a4ef225c Mon Sep 17 00:00:00 2001
+From: Jayantajit Gogoi <jayanta.gogoi525@gmail.com>
+Date: Sun, 11 Oct 2020 05:17:09 +0000
+Subject: [PATCH] sunxi: add dts for USB in OrangePi R1 expansion board
+
+OrangePi Zero and OrangePi R1 based of H2+ has two
+USB2.0 ports accessible through the 13-pin header.
+
+This patch enables the two additional USB2.0 ports.
+
+Signed-off-by: Jayantajit Gogoi <jayanta.gogoi525@gmail.com>
+---
+ arch/arm/boot/dts/sun8i-h2-plus-orangepi-r1.dts | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/arch/arm/boot/dts/sun8i-h2-plus-orangepi-r1.dts b/arch/arm/boot/dts/sun8i-h2-plus-orangepi-r1.dts
+index 3356f4210..8e117c95b 100644
+--- a/arch/arm/boot/dts/sun8i-h2-plus-orangepi-r1.dts
++++ b/arch/arm/boot/dts/sun8i-h2-plus-orangepi-r1.dts
+@@ -68,6 +68,14 @@
+ 	};
+ };
+ 
++&ehci2 {
++	status = "okay";
++};
++
++&ehci3 {
++	status = "okay";
++};
++
+ &spi0 {
+ 	status = "okay";
+ 
+@@ -85,6 +93,14 @@
+ 	status = "disabled";
+ };
+ 
++&ohci2 {
++	status = "okay";
++};
++
++&ohci3 {
++	status = "okay";
++};
++
+ &mmc1 {
+ 	vmmc-supply = <&reg_vcc3v3>;
+ 	vqmmc-supply = <&reg_vcc3v3>;
+-- 
+2.17.1
+

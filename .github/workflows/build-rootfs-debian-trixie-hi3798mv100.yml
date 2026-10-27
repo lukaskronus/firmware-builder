@@ -1,0 +1,213 @@
+name: Build Hi3798MV100 Kernel and Debian 13 Rootfs
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_ref:
+        description: histb-mainline/linux commit or branch
+        required: false
+        default: e92ca2afc9bcb365616ff780af29c9dcaf5f2d38
+
+jobs:
+  kernel:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+    - name: 1. Checkout Code
+      uses: actions/checkout@main
+
+    - name: 2. Install Kernel Build Dependencies
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y --no-install-recommends \
+          build-essential gcc-arm-linux-gnueabihf make bc bison flex \
+          libssl-dev libncurses-dev libelf-dev git u-boot-tools kmod
+
+    - name: 3. Clone histb-mainline/linux
+      env:
+        KERNEL_REF: ${{ inputs.kernel_ref }}
+      run: |
+        git init linux
+        git -C linux remote add origin https://github.com/histb-mainline/linux
+        git -C linux fetch --depth 1 origin "$KERNEL_REF"
+        git -C linux checkout --detach FETCH_HEAD
+        git -C linux log -1 --oneline
+
+    - name: 4. Apply Board DTS, Config and Thermal Driver
+      run: |
+        chmod +x scripts/prepare-kernel.sh
+        ./scripts/prepare-kernel.sh linux
+
+    - name: 5. Configure Kernel
+      run: |
+        make -C linux ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- olddefconfig
+
+    - name: 6. Build Kernel, Modules and DTB
+      run: |
+        make -C linux ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- \
+          -j"$(nproc)" zImage modules dtbs
+
+    - name: 7. Create uImage and Module Archive
+      run: |
+        KVER=$(make -s -C linux ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- kernelrelease)
+        echo "$KVER" > kernel_version.txt
+
+        cat linux/arch/arm/boot/zImage > zImage-dtb
+        while [ $(( $(stat -c%s zImage-dtb) % 4 )) -ne 0 ]; do
+          printf '\0' >> zImage-dtb
+        done
+        cat linux/arch/arm/boot/dts/hisilicon/hi3798mv100-a312.dtb >> zImage-dtb
+        mkimage -A arm -O linux -T kernel -C none \
+          -a 0x2000000 -e 0x2000000 -n "Linux-$KVER-a312" \
+          -d zImage-dtb uImage
+
+        rm -rf modules_out
+        make -C linux ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- \
+          INSTALL_MOD_PATH="$PWD/modules_out" INSTALL_MOD_STRIP=1 \
+          modules_install
+        rm -f modules_out/lib/modules/$KVER/build modules_out/lib/modules/$KVER/source
+
+        tar -C modules_out -czf modules.tar.gz "lib/modules/$KVER"
+        ls -lh uImage modules.tar.gz
+        mkimage -l uImage
+
+    - name: 8. Upload Kernel Artifacts
+      uses: actions/upload-artifact@main
+      with:
+        name: kernel-a312
+        path: |
+          uImage
+          modules.tar.gz
+          kernel_version.txt
+        retention-days: 7
+        if-no-files-found: error
+
+  build:
+    needs: kernel
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+
+    steps:
+    - name: 1. Checkout Code
+      uses: actions/checkout@main
+
+    - name: 2. Install Dependencies
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y --no-install-recommends \
+          qemu-user-static debootstrap e2fsprogs zip u-boot-tools
+
+    - name: 3. Download and Extract Original TTL Package
+      run: |
+        wget --no-check-certificate -q -c \
+          "https://node4.histb.com:9088/update/system/TTL-hi3798mv100-32bit.zip" \
+          -O original_ttl.zip
+        mkdir -p ttl_template
+        unzip -q original_ttl.zip -d ttl_template/
+        echo "TTL template contents:"
+        ls -la ttl_template/
+
+    - name: 4. Download Built Kernel and Modules
+      uses: actions/download-artifact@main
+      with:
+        name: kernel-a312
+        path: kernel_artifact
+
+    - name: 5. Install Kernel and Modules
+      run: |
+        KVER=$(cat kernel_artifact/kernel_version.txt)
+        cp kernel_artifact/uImage new_uImage
+        mkimage -l new_uImage
+
+        mkdir -p kernel_build/lib/modules
+        tar -C kernel_build -xzf kernel_artifact/modules.tar.gz
+        echo "Kernel version: $KVER"
+        ls -la kernel_build/lib/modules/
+
+    - name: 6. Build Debian 13 Trixie Rootfs
+      run: |
+        chmod +x build_rootfs.sh
+        ./build_rootfs.sh
+
+    - name: 7. Install Kernel Modules into Rootfs
+      run: |
+        ROOTFS_DIR="$(pwd)/pure_rootfs"
+        MODULES_SRC="kernel_build/lib/modules"
+        KVER=$(cat kernel_artifact/kernel_version.txt)
+
+        if [ ! -d "$MODULES_SRC/$KVER" ]; then
+          echo "ERROR: No modules found for $KVER in $MODULES_SRC"
+          ls -la "$MODULES_SRC" || true
+          exit 1
+        fi
+        echo "Installing modules for kernel: $KVER"
+
+        sudo mkdir -p "$ROOTFS_DIR/lib/modules"
+        sudo cp -a "$MODULES_SRC/$KVER" "$ROOTFS_DIR/lib/modules/"
+
+        sudo mount -t proc  none "$ROOTFS_DIR/proc"
+        sudo mount -t sysfs none "$ROOTFS_DIR/sys"
+        sudo chroot "$ROOTFS_DIR" depmod -a "$KVER"
+        sudo umount "$ROOTFS_DIR/proc" "$ROOTFS_DIR/sys"
+
+        echo "Installed modules:"
+        ls -la "$ROOTFS_DIR/lib/modules/"
+
+    - name: 8. Create Rootfs Image
+      run: |
+        # 512MB image - resize-rootfs.service will expand to full partition size on first boot
+        IMAGE_SIZE=$((512 * 1024 * 1024))
+        echo "Creating ${IMAGE_SIZE} byte (512MB) rootfs image"
+
+        dd if=/dev/zero of=rootfs-32-pure.img bs=1M count=512
+        mkfs.ext4 -F -L "rootfs" rootfs-32-pure.img
+
+        mkdir -p temp_mount
+        sudo mount -o loop rootfs-32-pure.img temp_mount
+        sudo cp -a pure_rootfs/. temp_mount/
+        sync
+        sudo umount temp_mount
+        rmdir temp_mount
+
+        ls -lh rootfs-32-pure.img
+
+    - name: 9. Package Final TTL
+      run: |
+        cp -r ttl_template/ final_package/
+        cp rootfs-32-pure.img final_package/rootfs-32.img
+        cp new_uImage final_package/uImage
+
+        DATE=$(date +%Y%m%d)
+        ZIP_NAME="TTL-hi3798mv100-32bit-Trixie-${DATE}.zip"
+
+        cd final_package
+        zip -r "../${ZIP_NAME}" .
+        cd ..
+
+        echo "Final package:"
+        ls -lh "${ZIP_NAME}"
+
+    - name: 10. Upload TTL Package
+      uses: actions/upload-artifact@main
+      with:
+        name: ttl-package-trixie
+        path: TTL-hi3798mv100-32bit-Trixie-*.zip
+        retention-days: 7
+        if-no-files-found: error
+
+    - name: 11. Upload Rootfs Image
+      uses: actions/upload-artifact@main
+      with:
+        name: rootfs-image-trixie
+        path: rootfs-32-pure.img
+        retention-days: 7
+        if-no-files-found: error
+
+    - name: 12. Upload Kernel uImage
+      uses: actions/upload-artifact@main
+      with:
+        name: kernel-uimage-a312
+        path: new_uImage
+        retention-days: 7
+        if-no-files-found: error

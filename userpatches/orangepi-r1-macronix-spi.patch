@@ -1,0 +1,10 @@
+--- a/configs/orangepi_r1_defconfig
++++ b/configs/orangepi_r1_defconfig
+@@ -10,6 +10,7 @@
+ CONFIG_CONSOLE_MUX=y
+ CONFIG_MTD=y
+ CONFIG_SPI_FLASH_WINBOND=y
++CONFIG_SPI_FLASH_MACRONIX=y
+ CONFIG_SUN8I_EMAC=y
+ CONFIG_SPI=y
+ CONFIG_USB_EHCI_HCD=y

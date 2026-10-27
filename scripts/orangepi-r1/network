@@ -1,0 +1,25 @@
+# This should be the default setting for /etc/config/network
+# For some reasons, the default device for LAN interface is usb0 instead of eth0
+config interface 'loopback'
+        option device 'lo'
+        option proto 'static'
+        option ipaddr '127.0.0.1'
+        option netmask '255.0.0.0'
+
+config globals 'globals'
+        option ula_prefix 'fde9:214a:7ac6::/48'
+
+config interface 'lan'
+        option device 'eth0'
+        option proto 'static'
+        option ipaddr '192.168.10.1'
+        option netmask '255.255.255.0'
+        option delegate '0'
+
+config interface 'wan'
+        option device 'eth1'
+        option proto 'dhcp'
+
+config interface 'wan6'
+        option device 'eth1'
+        option proto 'dhcpv6'
