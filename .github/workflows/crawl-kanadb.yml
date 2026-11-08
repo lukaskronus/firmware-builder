@@ -23,6 +23,10 @@ on:
         description: 'Discover only, do not download'
         type: boolean
         default: false
+      skip_images:
+        description: 'Skip downloading card images (saves server bandwidth)'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -44,7 +48,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests==2.34.2 beautifulsoup4==4.15.0
+          pip install requests==2.31.0 beautifulsoup4==4.12.3
 
       - name: Restore crawl state
         uses: actions/cache@v6
@@ -61,8 +65,10 @@ jobs:
           ARGS="$ARGS --workers ${{ github.event.inputs.workers }}"
           if [ "${{ github.event.inputs.force }}" = "true" ]; then ARGS="$ARGS --force"; fi
           if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
-          echo "Running: python card_crawler.py $ARGS"
-          python scripts/kana_scraper $ARGS
+          if [ "${{ github.event.inputs.skip_images }}" = "true" ]; then ARGS="$ARGS --skip-images"; fi
+          
+          echo "Running: python kana_scraper.py $ARGS"
+          python kana_scraper.py $ARGS
 
       - name: Ensure output directories exist
         if: always()
@@ -71,7 +77,7 @@ jobs:
           echo "JSON files:  $(ls kana_db_data  | wc -l)"
           echo "Image files: $(ls kana_db_images | wc -l)"
 
-      - name: Upload JSON data
+      - name: Upload JSON data (includes merged all_cards.json)
         if: always()
         uses: actions/upload-artifact@v7
         with:
@@ -81,7 +87,8 @@ jobs:
           retention-days: 7
 
       - name: Upload card images
-        if: always()
+        # Only upload images if we actually downloaded them
+        if: always() && github.event.inputs.skip_images != 'true'
         uses: actions/upload-artifact@v7
         with:
           name: kanadb-card-images

@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
 Usage:
-    python card_crawler.py                 # normal run (resumable)
-    python card_crawler.py --dry-run       # list what would be fetched
-    python card_crawler.py --force         # re-download everything
-    python card_crawler.py --workers 2     # override worker count
+python kana_scraper.py                 # normal run (resumable)
+python kana_scraper.py --dry-run       # list what would be fetched
+python kana_scraper.py --force         # re-download everything
+python kana_scraper.py --workers 2     # override worker count
+python kana_scraper.py --skip-images   # skip downloading images
+python kana_scraper.py --delay 0.5     # override delay
 """
-
 import argparse
 import json
 import os
@@ -17,26 +18,28 @@ import threading
 import time
 import urllib.robotparser
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
 import requests
 from bs4 import BeautifulSoup
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-
 BASE_URL = "http://ec2-3-39-192-44.ap-northeast-2.compute.amazonaws.com"
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
 
 # Global request budget. The script enforces BOTH:
 #   - a minimum gap between requests (rate cap)
 #   - a jittered extra sleep (human-ish, avoids lockstep bursts)
-MIN_INTERVAL = 0.5          # 2 req/s hard ceiling
+MIN_INTERVAL = 0.5          # 2 req/s hard ceiling (can be overridden by --delay)
 JITTER_MIN   = 0.1
 JITTER_MAX   = 0.4
+
 # Back off harder on errors:
 BACKOFF_BASE = 2.0          # seconds; doubles each consecutive failure
 BACKOFF_MAX  = 60.0
 MAX_CONSECUTIVE_FAILS = 8   # give up on a URL after this many in a row
+
+SKIP_IMAGES = False         # Controlled via CLI
 
 HEADERS = {
     "User-Agent": USER_AGENT,
@@ -47,11 +50,11 @@ HEADERS = {
 DATA_DIR   = "kana_db_data"
 IMAGE_DIR  = "kana_db_images"
 STATE_FILE = "kana_db_state.json"   # remembers which cards are already done
+MERGED_JSON = "all_cards.json"
 
 # ---------------------------------------------------------------------------
 # Rate limiter (thread-safe, global)
 # ---------------------------------------------------------------------------
-
 class RateLimiter:
     """
     Global limiter: guarantees >= MIN_INTERVAL between *any* two requests,
@@ -79,13 +82,7 @@ LIMITER = RateLimiter(MIN_INTERVAL, JITTER_MIN, JITTER_MAX)
 # ---------------------------------------------------------------------------
 # robots.txt
 # ---------------------------------------------------------------------------
-
 def check_robots(session: requests.Session, user_agent: str) -> urllib.robotparser.RobotFileParser:
-    """
-    Fetch and parse robots.txt. Returns a parser. If robots.txt is missing
-    or unreachable we conservatively treat everything as allowed (RFC 9309
-    says 404 = allow all), but we log it so the user knows.
-    """
     rp = urllib.robotparser.RobotFileParser()
     robots_url = f"{BASE_URL}/robots.txt"
     try:
@@ -95,7 +92,6 @@ def check_robots(session: requests.Session, user_agent: str) -> urllib.robotpars
             rp.parse(r.text.splitlines())
             print(f"[robots] loaded {robots_url}")
         elif r.status_code in (401, 403):
-            # Explicitly disallowed — refuse to crawl.
             rp.disallow_all = True
             print(f"[robots] {robots_url} returned {r.status_code}; treating as DISALLOW ALL")
         else:
@@ -115,7 +111,6 @@ def allowed(rp: urllib.robotparser.RobotFileParser, url: str, ua: str) -> bool:
 # ---------------------------------------------------------------------------
 # HTTP helpers
 # ---------------------------------------------------------------------------
-
 def make_session() -> requests.Session:
     s = requests.Session()
     s.headers.update(HEADERS)
@@ -123,10 +118,6 @@ def make_session() -> requests.Session:
 
 def fetch(session: requests.Session, url: str, *, expect_json: bool = False,
           retries: int = 3) -> requests.Response:
-    """
-    Polite GET with exponential backoff and Retry-After support.
-    Raises requests.RequestException on final failure.
-    """
     delay = BACKOFF_BASE
     last_exc = None
     for attempt in range(1, retries + 1):
@@ -140,15 +131,12 @@ def fetch(session: requests.Session, url: str, *, expect_json: bool = False,
             delay *= 2
             continue
 
-        # Honor server-requested backoff.
         if r.status_code == 429 or r.status_code == 503:
             retry_after = r.headers.get("Retry-After")
             wait = BACKOFF_BASE
             if retry_after:
-                try:
-                    wait = float(retry_after)
-                except ValueError:
-                    pass
+                try: wait = float(retry_after)
+                except ValueError: pass
             print(f"  [backoff] {r.status_code} on {url}, sleeping {wait:.1f}s")
             time.sleep(min(wait, BACKOFF_MAX))
             continue
@@ -160,36 +148,28 @@ def fetch(session: requests.Session, url: str, *, expect_json: bool = False,
             continue
 
         if r.status_code >= 400:
-            # 4xx (other than 429) is not retryable.
             raise requests.HTTPError(f"{r.status_code} for {url}", response=r)
 
         if expect_json:
             ctype = r.headers.get("Content-Type", "")
             if "json" not in ctype.lower():
-                raise requests.HTTPError(
-                    f"Expected JSON from {url}, got Content-Type={ctype!r}",
-                    response=r,
-                )
+                raise requests.HTTPError(f"Expected JSON from {url}, got Content-Type={ctype!r}", response=r)
             try:
-                r.json()  # validate now, not later
+                r.json()
             except ValueError as e:
-                raise requests.HTTPError(
-                    f"Invalid JSON from {url}: {e}", response=r)
+                raise requests.HTTPError(f"Invalid JSON from {url}: {e}", response=r)
+
         return r
 
-    raise requests.RequestException(
-        f"giving up on {url} after {retries} attempts") from last_exc
+    raise requests.RequestException(f"giving up on {url} after {retries} attempts") from last_exc
 
-# WebP magic bytes: "RIFF....WEBP" (12 bytes: RIFF + 4 size + WEBP)
 _WEBP_RE = re.compile(rb"^RIFF....WEBP", re.DOTALL)
-
 def looks_like_webp(data: bytes) -> bool:
     return len(data) >= 12 and bool(_WEBP_RE.match(data[:12]))
 
 # ---------------------------------------------------------------------------
 # Discovery
 # ---------------------------------------------------------------------------
-
 def get_max_pages(session: requests.Session, rp: urllib.robotparser.RobotFileParser) -> int:
     url = f"{BASE_URL}/en/card/"
     if not allowed(rp, url, USER_AGENT):
@@ -227,10 +207,8 @@ def get_card_ids(session: requests.Session, rp: urllib.robotparser.RobotFilePars
 # ---------------------------------------------------------------------------
 # State (resumability)
 # ---------------------------------------------------------------------------
-
 def load_state() -> set[str]:
-    if not os.path.exists(STATE_FILE):
-        return set()
+    if not os.path.exists(STATE_FILE): return set()
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             return set(json.load(f).get("done", []))
@@ -246,10 +224,8 @@ def save_state(done: set[str]) -> None:
 # ---------------------------------------------------------------------------
 # Per-card work
 # ---------------------------------------------------------------------------
-
 def scrape_card(session: requests.Session, rp: urllib.robotparser.RobotFileParser,
                 cid: str) -> str:
-    """Returns the card name on success, raises on failure."""
     detail_url = f"{BASE_URL}/en/card/select/{cid}"
     if not allowed(rp, detail_url, USER_AGENT):
         raise PermissionError(f"robots.txt disallows {detail_url}")
@@ -259,54 +235,80 @@ def scrape_card(session: requests.Session, rp: urllib.robotparser.RobotFileParse
     payload = r.json()
     if "html" not in payload:
         raise ValueError(f"unexpected JSON shape for card {cid}: keys={list(payload)[:5]}")
-
+    
     html = payload["html"]
     detail_soup = BeautifulSoup(html, "html.parser")
 
-    hp_el = detail_soup.find(class_="card-tile__stat--hp")
-    hp = hp_el.get_text(strip=True) if hp_el else "Unknown"
-
-    name_el = detail_soup.find(class_="card-detail__title")
+    # --- Rich Data Extraction ---
+    name_el = detail_soup.select_one(".card-detail__name")
     name = name_el.get_text(strip=True) if name_el else f"Card_{cid}"
+    
+    meta_texts = [p.get_text(strip=True) for p in detail_soup.select(".card-detail__meta-text")]
+    episode = meta_texts[0] if len(meta_texts) > 0 else ""
+    rarity = meta_texts[1] if len(meta_texts) > 1 else ""
+    cost = meta_texts[3] if len(meta_texts) > 3 else "" 
+    
+    tag_el = detail_soup.select_one(".card-detail__tag")
+    tags = tag_el.get_text(strip=True) if tag_el else ""
+    
+    stats = {
+        "size": detail_soup.select_one(".card-tile__stat--size").get_text(strip=True) if detail_soup.select_one(".card-tile__stat--size") else "0",
+        "atk": detail_soup.select_one(".card-tile__stat--atk").get_text(strip=True) if detail_soup.select_one(".card-tile__stat--atk") else "0",
+        "def": detail_soup.select_one(".card-tile__stat--def").get_text(strip=True) if detail_soup.select_one(".card-tile__stat--def") else "0",
+        "hp": detail_soup.select_one(".card-tile__stat--hp").get_text(strip=True) if detail_soup.select_one(".card-tile__stat--hp") else "0"
+    }
+    
+    skill_div = detail_soup.select_one('[data-text-panel="skill"]')
+    skill_text = "\n".join([p.get_text(strip=True) for p in skill_div.select('p') if p.get_text(strip=True)]) if skill_div else ""
+    
+    story_div = detail_soup.select_one('[data-text-panel="story"]')
+    story_text = "\n".join([p.get_text(strip=True) for p in story_div.select('p') if p.get_text(strip=True)]) if story_div else ""
 
-    # 2) Image
     img_url = f"{BASE_URL}/static/card/Texture2D/CARD_{cid}.webp"
-    if not allowed(rp, img_url, USER_AGENT):
-        raise PermissionError(f"robots.txt disallows {img_url}")
 
-    img_r = fetch(session, img_url)
-    img_data = img_r.content
-    if not looks_like_webp(img_data):
-        ctype = img_r.headers.get("Content-Type", "?")
-        raise ValueError(
-            f"card {cid}: image is not WebP (Content-Type={ctype!r}, "
-            f"{len(img_data)} bytes) — refusing to save")
+    # 2) Image (Optional)
+    if not SKIP_IMAGES:
+        if not allowed(rp, img_url, USER_AGENT):
+            raise PermissionError(f"robots.txt disallows {img_url}")
+        img_r = fetch(session, img_url)
+        img_data = img_r.content
+        if not looks_like_webp(img_data):
+            ctype = img_r.headers.get("Content-Type", "?")
+            raise ValueError(f"card {cid}: image is not WebP (Content-Type={ctype!r}, {len(img_data)} bytes)")
+        
+        img_path = os.path.join(IMAGE_DIR, f"{cid}.webp")
+        with open(img_path, "wb") as f:
+            f.write(img_data)
 
-    # 3) Persist
+    # 3) Persist JSON
     json_path = os.path.join(DATA_DIR, f"{cid}.json")
-    img_path  = os.path.join(IMAGE_DIR, f"{cid}.webp")
+    card_data = {
+        "id": cid, "name": name, "episode": episode, "rarity": rarity,
+        "cost": cost, "tags": tags, "stats": stats, "skill": skill_text,
+        "story": story_text, "image_url": img_url
+    }
     with open(json_path, "w", encoding="utf-8") as f:
-        json.dump(
-            {"id": cid, "name": name, "hp": hp, "image_url": img_url},
-            f, ensure_ascii=False, indent=2,
-        )
-    with open(img_path, "wb") as f:
-        f.write(img_data)
+        json.dump(card_data, f, ensure_ascii=False, indent=2)
+
     return name
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
-
 def main() -> int:
+    global MIN_INTERVAL, SKIP_IMAGES
+    
     ap = argparse.ArgumentParser(description="Polite Kana card crawler")
-    ap.add_argument("--workers", type=int, default=2,
-                    help="parallel workers (keep low to be polite; default 2)")
-    ap.add_argument("--force", action="store_true",
-                    help="ignore saved state and re-download everything")
-    ap.add_argument("--dry-run", action="store_true",
-                    help="discover cards but do not download")
+    ap.add_argument("--workers", type=int, default=2)
+    ap.add_argument("--delay", type=float, default=0.5)
+    ap.add_argument("--force", action="store_true")
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--skip-images", action="store_true")
     args = ap.parse_args()
+
+    MIN_INTERVAL = args.delay
+    SKIP_IMAGES = args.skip_images
+    LIMITER.min_interval = MIN_INTERVAL
 
     os.makedirs(DATA_DIR, exist_ok=True)
     os.makedirs(IMAGE_DIR, exist_ok=True)
@@ -327,16 +329,13 @@ def main() -> int:
     print(f"[plan] {len(done)} already done, {len(todo)} to fetch")
 
     if args.dry_run:
-        print("[dry-run] would fetch:", ", ".join(todo[:20]),
-              ("..." if len(todo) > 20 else ""))
+        print("[dry-run] would fetch:", ", ".join(todo[:20]), ("..." if len(todo) > 20 else ""))
         return 0
 
     success = 0
     consecutive_fail = 0
-
-    # One Session per worker for cookie continuity, but a small pool is fine.
     worker_sessions: list[requests.Session] = [make_session() for _ in range(args.workers)]
-    session_q = list(worker_sessions)  # simple reuse; each worker pops one
+    session_q = list(worker_sessions)
     lock = threading.Lock()
 
     def work(cid: str) -> tuple[str, str | None, Exception | None]:
@@ -361,20 +360,36 @@ def main() -> int:
                     done.add(cid)
                     consecutive_fail = 0
                     print(f"[{len(done)}/{len(all_ids)}] {name} ({cid})")
-                    # Persist state every 20 successes
                     if success % 20 == 0:
                         save_state(done)
                 else:
                     consecutive_fail += 1
                     print(f"[fail] {cid}: {err}")
                     if consecutive_fail >= MAX_CONSECUTIVE_FAILS:
-                        print(f"[abort] {consecutive_fail} consecutive failures — "
-                              f"the server may be unhappy. Stopping.")
+                        print(f"[abort] {consecutive_fail} consecutive failures. Stopping.")
                         raise KeyboardInterrupt
     except KeyboardInterrupt:
         print("[interrupt] saving state and exiting...")
     finally:
         save_state(done)
+
+    # Merge all individual JSON files into a single master file
+    print("[merge] combining all card data into a single JSON file...")
+    all_cards = []
+    if os.path.exists(DATA_DIR):
+        for filename in sorted(os.listdir(DATA_DIR)):
+            if filename.endswith(".json") and filename != MERGED_JSON:
+                filepath = os.path.join(DATA_DIR, filename)
+                try:
+                    with open(filepath, "r", encoding="utf-8") as f:
+                        all_cards.append(json.load(f))
+                except Exception as e:
+                    print(f"[warn] could not read {filename}: {e}")
+                    
+    merged_path = os.path.join(DATA_DIR, MERGED_JSON)
+    with open(merged_path, "w", encoding="utf-8") as f:
+        json.dump(all_cards, f, ensure_ascii=False, indent=2)
+    print(f"[merge] saved {len(all_cards)} cards to {merged_path}")
 
     print(f"[done] {success} new, {len(done)} total cached.")
     return 0
