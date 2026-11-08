@@ -51,15 +51,22 @@ STATE_FILE = "kana_db_state.json"
 MERGED_JSON = "all_cards.json"
 
 # ---------------------------------------------------------------------------
-# Faction mapping (from card frame image)
+# Faction mapping (theme filter on the list page)
 # ---------------------------------------------------------------------------
-FACTION_MAP = {
-    "01": "Vita",
-    "02": "Royle",
-    "03": "Crux",
-    "04": "Darklore",
-    "05": "Neutral",
+# The detail page carries no faction field. Faction exists only as the
+# `theme` checkbox filter on /en/card/; each theme lists its cards over
+# ~24-46 pages. Verified: the five themes partition the full catalog
+# exactly (552+548+524+524+278 = 2426, zero overlap).
+FACTION_THEME = {
+    1: "Vita",
+    2: "Royle",
+    3: "Crux",
+    4: "Darklore",
+    5: "Independence",
 }
+
+FACTION_REPORT_JSON = "faction_report.json"
+FACTION_PAGES_MAX   = 400     # safety cap per theme
 
 # ---------------------------------------------------------------------------
 # Category mapping (from card ID first digit)
@@ -272,15 +279,8 @@ def scrape_card(session: requests.Session, rp: urllib.robotparser.RobotFileParse
     rarity  = meta_texts[1] if len(meta_texts) > 1 else ""
     cost    = meta_texts[3] if len(meta_texts) > 3 else ""
 
-    # --- Faction (from card frame image) ---
+    # --- Faction (backfilled from the list-page theme filter at merge time) ---
     faction = "Unknown"
-    frame_el = detail_soup.select_one(".card-tile__frame")
-    if frame_el:
-        style = frame_el.get("style", "")
-        frame_match = re.search(r"CARD_FRAME_(\d+)", style)
-        if frame_match:
-            frame_num = frame_match.group(1)
-            faction = FACTION_MAP.get(frame_num, f"Frame_{frame_num}")
 
     # --- Tags ---
     tag_el = detail_soup.select_one(".card-detail__tag")
@@ -360,9 +360,54 @@ def scrape_card(session: requests.Session, rp: urllib.robotparser.RobotFileParse
     return name
 
 # ---------------------------------------------------------------------------
+# Faction backfill (list-page theme filter)
+# ---------------------------------------------------------------------------
+def crawl_factions(session: requests.Session,
+                   rp: urllib.robotparser.RobotFileParser) -> tuple[dict[str, str], list[list[str]]]:
+    """Page through each theme filter; map card id -> faction label."""
+    faction_by_id: dict[str, str] = {}
+    conflicts: list[list[str]] = []
+    for theme, label in FACTION_THEME.items():
+        page = 1
+        page_total = None
+        theme_count = 0
+        while True:
+            url = f"{BASE_URL}/en/card/?search_type=name&search_text=&theme={theme}&page={page}"
+            if not allowed(rp, url, USER_AGENT):
+                print(f"[faction] robots.txt disallows {url}; skipping theme {theme}")
+                break
+            try:
+                r = fetch(session, url)
+            except requests.RequestException as e:
+                print(f"[faction] theme {theme} page {page} failed: {e}; stopping theme")
+                break
+            soup = BeautifulSoup(r.text, "html.parser")
+            if page_total is None:
+                root = soup.find(attrs={"data-card-search": True})
+                if root and root.has_attr("data-page-total"):
+                    try:
+                        page_total = int(root["data-page-total"])
+                    except ValueError:
+                        page_total = 1
+            found = [c["data-card-id"] for c in soup.find_all(attrs={"data-card-id": True})]
+            for cid in found:
+                if cid in faction_by_id:
+                    conflicts.append([cid, faction_by_id[cid], label])
+                else:
+                    faction_by_id[cid] = label
+                    theme_count += 1
+            print(f"[faction] theme {theme}/{label} page {page}/{page_total or '?'} ({len(found)} ids)")
+            if not found or (page_total is not None and page >= page_total) or page >= FACTION_PAGES_MAX:
+                break
+            page += 1
+        print(f"[faction] theme {theme}/{label}: {theme_count} cards")
+    return faction_by_id, conflicts
+
+# ---------------------------------------------------------------------------
 # Merge
 # ---------------------------------------------------------------------------
-def merge_all_cards() -> None:
+def merge_all_cards(faction_by_id: dict[str, str] | None = None,
+                    conflicts: list[list[str]] | None = None) -> None:
     print("[merge] combining all card data into a single JSON file...")
     all_cards = []
     if os.path.exists(DATA_DIR):
@@ -374,6 +419,30 @@ def merge_all_cards() -> None:
                         all_cards.append(json.load(f))
                 except Exception as e:
                     print(f"[warn] could not read {filename}: {e}")
+
+    faction_by_id = faction_by_id or {}
+    unknown = []
+    counts: dict[str, int] = {label: 0 for label in FACTION_THEME.values()}
+    for c in all_cards:
+        fac = faction_by_id.get(c["id"])
+        if fac:
+            c["faction"] = fac
+            counts.setdefault(fac, 0)
+            counts[fac] += 1
+        else:
+            c["faction"] = "Unknown"   # frame-based guesses are unusable; never keep them
+            unknown.append(c["id"])
+
+    report = {
+        "faction_counts": counts,
+        "unknown": unknown,
+        "conflicts": conflicts or [],
+        "total_cards": len(all_cards),
+    }
+    with open(FACTION_REPORT_JSON, "w", encoding="utf-8") as f:
+        json.dump(report, f, ensure_ascii=False, indent=2)
+    print(f"[faction] unknown={len(unknown)} conflicts={len(conflicts or [])} "
+          f"report={FACTION_REPORT_JSON}")
 
     merged_path = os.path.join(DATA_DIR, MERGED_JSON)
     with open(merged_path, "w", encoding="utf-8") as f:
@@ -468,8 +537,12 @@ def main() -> int:
     finally:
         save_state(done)
 
+    # Faction backfill runs even when everything is cached — it is the
+    # cheapest way to fix factions on an existing kana_db_data/ cache.
+    faction_by_id, conflicts = crawl_factions(session, rp)
+
     # Merge all individual JSON files into one
-    merge_all_cards()
+    merge_all_cards(faction_by_id, conflicts)
 
     print(f"[done] {success} new, {len(done)} total cached.")
     return 0
