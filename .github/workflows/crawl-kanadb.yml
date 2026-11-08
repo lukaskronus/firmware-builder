@@ -68,7 +68,7 @@ jobs:
           if [ "${{ github.event.inputs.skip_images }}" = "true" ]; then ARGS="$ARGS --skip-images"; fi
           
           echo "Running: python kana_scraper.py $ARGS"
-          python kana_scraper.py $ARGS
+          python scripts/kana_scraper.py $ARGS
 
       - name: Ensure output directories exist
         if: always()
