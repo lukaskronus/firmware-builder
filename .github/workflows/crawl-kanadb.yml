@@ -48,15 +48,20 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests==2.31.0 beautifulsoup4==4.12.3
+          pip install requests==2.34.2 beautifulsoup4==4.15.0
 
-      - name: Restore crawl state
+      # Cache the OUTPUT too, not just the state file.
+      # Unique key per run + prefix restore = always saves fresh, restores latest.
+      - name: Restore crawl state and data
         uses: actions/cache@v6
         with:
-          path: kana_db_state.json
-          key: kanadb-state-v1
+          path: |
+            kana_db_state.json
+            kana_db_data/
+            kana_db_images/
+          key: kanadb-full-${{ github.run_id }}
           restore-keys: |
-            kanadb-state-v1
+            kanadb-full-
 
       - name: Run crawler
         run: |
@@ -66,18 +71,17 @@ jobs:
           if [ "${{ github.event.inputs.force }}" = "true" ]; then ARGS="$ARGS --force"; fi
           if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
           if [ "${{ github.event.inputs.skip_images }}" = "true" ]; then ARGS="$ARGS --skip-images"; fi
-          
-          echo "Running: python kana_scraper.py $ARGS"
+          echo "Running: python scripts/kana_scraper.py $ARGS"
           python scripts/kana_scraper.py $ARGS
 
       - name: Ensure output directories exist
         if: always()
         run: |
           mkdir -p kana_db_data kana_db_images
-          echo "JSON files:  $(ls kana_db_data  | wc -l)"
+          echo "JSON files:  $(ls kana_db_data | wc -l)"
           echo "Image files: $(ls kana_db_images | wc -l)"
 
-      - name: Upload JSON data (includes merged all_cards.json)
+      - name: Upload JSON data
         if: always()
         uses: actions/upload-artifact@v7
         with:
@@ -87,7 +91,6 @@ jobs:
           retention-days: 7
 
       - name: Upload card images
-        # Only upload images if we actually downloaded them
         if: always() && github.event.inputs.skip_images != 'true'
         uses: actions/upload-artifact@v7
         with:
@@ -95,10 +98,3 @@ jobs:
           path: kana_db_images/
           if-no-files-found: warn
           retention-days: 7
-
-      - name: Save crawl state
-        if: always()
-        uses: actions/cache/save@v6
-        with:
-          path: kana_db_state.json
-          key: kanadb-state-${{ github.run_id }}
