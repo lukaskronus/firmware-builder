@@ -27,9 +27,7 @@ from bs4 import BeautifulSoup
 BASE_URL = "http://ec2-3-39-192-44.ap-northeast-2.compute.amazonaws.com"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
 
-# Global request budget. The script enforces BOTH:
-#   - a minimum gap between requests (rate cap)
-#   - a jittered extra sleep (human-ish, avoids lockstep bursts)
+# Global request budget.
 MIN_INTERVAL = 0.5          # 2 req/s hard ceiling (can be overridden by --delay)
 JITTER_MIN   = 0.1
 JITTER_MAX   = 0.4
@@ -49,8 +47,28 @@ HEADERS = {
 
 DATA_DIR   = "kana_db_data"
 IMAGE_DIR  = "kana_db_images"
-STATE_FILE = "kana_db_state.json"   # remembers which cards are already done
+STATE_FILE = "kana_db_state.json"
 MERGED_JSON = "all_cards.json"
+
+# ---------------------------------------------------------------------------
+# Faction mapping (from card frame image)
+# ---------------------------------------------------------------------------
+FACTION_MAP = {
+    "01": "Vita",
+    "02": "Royle",
+    "03": "Crux",
+    "04": "Darklore",
+    "05": "Neutral",
+}
+
+# ---------------------------------------------------------------------------
+# Category mapping (from card ID first digit)
+# ---------------------------------------------------------------------------
+CATEGORY_MAP = {
+    "1": "Character",
+    "2": "Spell",
+    "3": "Follower",
+}
 
 # ---------------------------------------------------------------------------
 # Rate limiter (thread-safe, global)
@@ -153,7 +171,8 @@ def fetch(session: requests.Session, url: str, *, expect_json: bool = False,
         if expect_json:
             ctype = r.headers.get("Content-Type", "")
             if "json" not in ctype.lower():
-                raise requests.HTTPError(f"Expected JSON from {url}, got Content-Type={ctype!r}", response=r)
+                raise requests.HTTPError(
+                    f"Expected JSON from {url}, got Content-Type={ctype!r}", response=r)
             try:
                 r.json()
             except ValueError as e:
@@ -208,7 +227,8 @@ def get_card_ids(session: requests.Session, rp: urllib.robotparser.RobotFilePars
 # State (resumability)
 # ---------------------------------------------------------------------------
 def load_state() -> set[str]:
-    if not os.path.exists(STATE_FILE): return set()
+    if not os.path.exists(STATE_FILE):
+        return set()
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             return set(json.load(f).get("done", []))
@@ -226,6 +246,7 @@ def save_state(done: set[str]) -> None:
 # ---------------------------------------------------------------------------
 def scrape_card(session: requests.Session, rp: urllib.robotparser.RobotFileParser,
                 cid: str) -> str:
+    """Returns the card name on success, raises on failure."""
     detail_url = f"{BASE_URL}/en/card/select/{cid}"
     if not allowed(rp, detail_url, USER_AGENT):
         raise PermissionError(f"robots.txt disallows {detail_url}")
@@ -235,38 +256,71 @@ def scrape_card(session: requests.Session, rp: urllib.robotparser.RobotFileParse
     payload = r.json()
     if "html" not in payload:
         raise ValueError(f"unexpected JSON shape for card {cid}: keys={list(payload)[:5]}")
-    
     html = payload["html"]
     detail_soup = BeautifulSoup(html, "html.parser")
 
-    # --- Rich Data Extraction ---
+    # --- Name ---
     name_el = detail_soup.select_one(".card-detail__name")
     name = name_el.get_text(strip=True) if name_el else f"Card_{cid}"
-    
+
+    # --- Category (from card ID first digit) ---
+    category = CATEGORY_MAP.get(cid[0], "Unknown")
+
+    # --- Meta (Episode, Rarity, Cost) ---
     meta_texts = [p.get_text(strip=True) for p in detail_soup.select(".card-detail__meta-text")]
     episode = meta_texts[0] if len(meta_texts) > 0 else ""
-    rarity = meta_texts[1] if len(meta_texts) > 1 else ""
-    cost = meta_texts[3] if len(meta_texts) > 3 else "" 
-    
+    rarity  = meta_texts[1] if len(meta_texts) > 1 else ""
+    cost    = meta_texts[3] if len(meta_texts) > 3 else ""
+
+    # --- Faction (from card frame image) ---
+    faction = "Unknown"
+    frame_el = detail_soup.select_one(".card-tile__frame")
+    if frame_el:
+        style = frame_el.get("style", "")
+        frame_match = re.search(r"CARD_FRAME_(\d+)", style)
+        if frame_match:
+            frame_num = frame_match.group(1)
+            faction = FACTION_MAP.get(frame_num, f"Frame_{frame_num}")
+
+    # --- Tags ---
     tag_el = detail_soup.select_one(".card-detail__tag")
     tags = tag_el.get_text(strip=True) if tag_el else ""
-    
+
+    # --- Stats ---
+    def stat_text(selector):
+        el = detail_soup.select_one(selector)
+        return el.get_text(strip=True) if el else "0"
+
     stats = {
-        "size": detail_soup.select_one(".card-tile__stat--size").get_text(strip=True) if detail_soup.select_one(".card-tile__stat--size") else "0",
-        "atk": detail_soup.select_one(".card-tile__stat--atk").get_text(strip=True) if detail_soup.select_one(".card-tile__stat--atk") else "0",
-        "def": detail_soup.select_one(".card-tile__stat--def").get_text(strip=True) if detail_soup.select_one(".card-tile__stat--def") else "0",
-        "hp": detail_soup.select_one(".card-tile__stat--hp").get_text(strip=True) if detail_soup.select_one(".card-tile__stat--hp") else "0"
+        "size": stat_text(".card-tile__stat--size"),
+        "atk":  stat_text(".card-tile__stat--atk"),
+        "def":  stat_text(".card-tile__stat--def"),
+        "hp":   stat_text(".card-tile__stat--hp"),
     }
-    
+
+    # --- Skill & Story text ---
     skill_div = detail_soup.select_one('[data-text-panel="skill"]')
-    skill_text = "\n".join([p.get_text(strip=True) for p in skill_div.select('p') if p.get_text(strip=True)]) if skill_div else ""
-    
+    skill_text = "\n".join(
+        [p.get_text(strip=True) for p in skill_div.select("p") if p.get_text(strip=True)]
+    ) if skill_div else ""
+
     story_div = detail_soup.select_one('[data-text-panel="story"]')
-    story_text = "\n".join([p.get_text(strip=True) for p in story_div.select('p') if p.get_text(strip=True)]) if story_div else ""
+    story_text = "\n".join(
+        [p.get_text(strip=True) for p in story_div.select("p") if p.get_text(strip=True)]
+    ) if story_div else ""
 
+    # --- Producible (has crafting materials?) ---
+    products_el = detail_soup.select_one('[data-card-products]')
+    producible = False
+    if products_el:
+        material_rows = products_el.select('tr')
+        producible = len(material_rows) > 0
+
+    # --- Uncollectable ---
+    uncollectable = (episode.strip() == "" or episode.strip() == "\xa0")
+
+    # 2) Image
     img_url = f"{BASE_URL}/static/card/Texture2D/CARD_{cid}.webp"
-
-    # 2) Image (Optional)
     if not SKIP_IMAGES:
         if not allowed(rp, img_url, USER_AGENT):
             raise PermissionError(f"robots.txt disallows {img_url}")
@@ -274,8 +328,9 @@ def scrape_card(session: requests.Session, rp: urllib.robotparser.RobotFileParse
         img_data = img_r.content
         if not looks_like_webp(img_data):
             ctype = img_r.headers.get("Content-Type", "?")
-            raise ValueError(f"card {cid}: image is not WebP (Content-Type={ctype!r}, {len(img_data)} bytes)")
-        
+            raise ValueError(
+                f"card {cid}: image is not WebP (Content-Type={ctype!r}, "
+                f"{len(img_data)} bytes) — refusing to save")
         img_path = os.path.join(IMAGE_DIR, f"{cid}.webp")
         with open(img_path, "wb") as f:
             f.write(img_data)
@@ -283,9 +338,21 @@ def scrape_card(session: requests.Session, rp: urllib.robotparser.RobotFileParse
     # 3) Persist JSON
     json_path = os.path.join(DATA_DIR, f"{cid}.json")
     card_data = {
-        "id": cid, "name": name, "episode": episode, "rarity": rarity,
-        "cost": cost, "tags": tags, "stats": stats, "skill": skill_text,
-        "story": story_text, "image_url": img_url
+        "id": cid,
+        "name": name,
+        "category": category,
+        "episode": episode,
+        "rarity": rarity,
+        "cost": cost,
+        "faction": faction,
+        "tags": tags,
+        "uncollectable": uncollectable,
+        "producible": producible,
+        "stats": stats,
+        "skill": skill_text,
+        "story": story_text,
+        "image_url": img_url,
+        "image_file": f"{cid}.webp",
     }
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(card_data, f, ensure_ascii=False, indent=2)
@@ -293,17 +360,43 @@ def scrape_card(session: requests.Session, rp: urllib.robotparser.RobotFileParse
     return name
 
 # ---------------------------------------------------------------------------
+# Merge
+# ---------------------------------------------------------------------------
+def merge_all_cards() -> None:
+    print("[merge] combining all card data into a single JSON file...")
+    all_cards = []
+    if os.path.exists(DATA_DIR):
+        for filename in sorted(os.listdir(DATA_DIR)):
+            if filename.endswith(".json") and filename != MERGED_JSON:
+                filepath = os.path.join(DATA_DIR, filename)
+                try:
+                    with open(filepath, "r", encoding="utf-8") as f:
+                        all_cards.append(json.load(f))
+                except Exception as e:
+                    print(f"[warn] could not read {filename}: {e}")
+
+    merged_path = os.path.join(DATA_DIR, MERGED_JSON)
+    with open(merged_path, "w", encoding="utf-8") as f:
+        json.dump(all_cards, f, ensure_ascii=False, indent=2)
+    print(f"[merge] saved {len(all_cards)} cards to {merged_path}")
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main() -> int:
     global MIN_INTERVAL, SKIP_IMAGES
-    
+
     ap = argparse.ArgumentParser(description="Polite Kana card crawler")
-    ap.add_argument("--workers", type=int, default=2)
-    ap.add_argument("--delay", type=float, default=0.5)
-    ap.add_argument("--force", action="store_true")
-    ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--skip-images", action="store_true")
+    ap.add_argument("--workers", type=int, default=2,
+                    help="parallel workers (keep low to be polite; default 2)")
+    ap.add_argument("--delay", type=float, default=0.5,
+                    help="minimum seconds between requests (default 0.5)")
+    ap.add_argument("--force", action="store_true",
+                    help="ignore saved state and re-download everything")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="discover cards but do not download")
+    ap.add_argument("--skip-images", action="store_true",
+                    help="skip downloading card images to save bandwidth")
     args = ap.parse_args()
 
     MIN_INTERVAL = args.delay
@@ -329,7 +422,8 @@ def main() -> int:
     print(f"[plan] {len(done)} already done, {len(todo)} to fetch")
 
     if args.dry_run:
-        print("[dry-run] would fetch:", ", ".join(todo[:20]), ("..." if len(todo) > 20 else ""))
+        print("[dry-run] would fetch:", ", ".join(todo[:20]),
+              ("..." if len(todo) > 20 else ""))
         return 0
 
     success = 0
@@ -366,30 +460,16 @@ def main() -> int:
                     consecutive_fail += 1
                     print(f"[fail] {cid}: {err}")
                     if consecutive_fail >= MAX_CONSECUTIVE_FAILS:
-                        print(f"[abort] {consecutive_fail} consecutive failures. Stopping.")
+                        print(f"[abort] {consecutive_fail} consecutive failures — "
+                              f"the server may be unhappy. Stopping.")
                         raise KeyboardInterrupt
     except KeyboardInterrupt:
         print("[interrupt] saving state and exiting...")
     finally:
         save_state(done)
 
-    # Merge all individual JSON files into a single master file
-    print("[merge] combining all card data into a single JSON file...")
-    all_cards = []
-    if os.path.exists(DATA_DIR):
-        for filename in sorted(os.listdir(DATA_DIR)):
-            if filename.endswith(".json") and filename != MERGED_JSON:
-                filepath = os.path.join(DATA_DIR, filename)
-                try:
-                    with open(filepath, "r", encoding="utf-8") as f:
-                        all_cards.append(json.load(f))
-                except Exception as e:
-                    print(f"[warn] could not read {filename}: {e}")
-                    
-    merged_path = os.path.join(DATA_DIR, MERGED_JSON)
-    with open(merged_path, "w", encoding="utf-8") as f:
-        json.dump(all_cards, f, ensure_ascii=False, indent=2)
-    print(f"[merge] saved {len(all_cards)} cards to {merged_path}")
+    # Merge all individual JSON files into one
+    merge_all_cards()
 
     print(f"[done] {success} new, {len(done)} total cached.")
     return 0
