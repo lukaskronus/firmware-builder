@@ -40,7 +40,8 @@ MAX_CONSECUTIVE_FAILS = 8   # give up on a URL after this many in a row
 
 SKIP_IMAGES = False         # Controlled via CLI
 INCLUDE_UNCOLLECTABLE = False
-EXTRA_PARAMS = ""            # e.g. "&etc=uncollectable"
+LIST_PARAMS = ""    # full-catalog list query (discovery), without leading ?
+FILTER_PARAMS = ""  # appended to other filtered queries (e.g. theme)
 
 HEADERS = {
     "User-Agent": USER_AGENT,
@@ -200,7 +201,8 @@ def looks_like_webp(data: bytes) -> bool:
 # Discovery
 # ---------------------------------------------------------------------------
 def get_max_pages(session: requests.Session, rp: urllib.robotparser.RobotFileParser) -> int:
-    url = f"{BASE_URL}/en/card/?tab=detail{EXTRA_PARAMS}"
+    qs = LIST_PARAMS or "tab=detail"
+    url = f"{BASE_URL}/en/card/?{qs}"
     if not allowed(rp, url, USER_AGENT):
         raise SystemExit(f"[robots] disallowed: {url}")
     r = fetch(session, url)
@@ -218,7 +220,10 @@ def get_card_ids(session: requests.Session, rp: urllib.robotparser.RobotFilePars
                  max_pages: int) -> list[str]:
     ids: set[str] = set()
     for page in range(1, max_pages + 1):
-        url = f"{BASE_URL}/en/card/?page={page}{EXTRA_PARAMS}"
+        if LIST_PARAMS:
+            url = f"{BASE_URL}/en/card/?{LIST_PARAMS}&page={page}"
+        else:
+            url = f"{BASE_URL}/en/card/?page={page}"
         if not allowed(rp, url, USER_AGENT):
             print(f"[robots] skipping disallowed page {page}")
             continue
@@ -375,7 +380,7 @@ def crawl_factions(session: requests.Session,
         page_total = None
         theme_count = 0
         while True:
-            url = f"{BASE_URL}/en/card/?search_type=name&search_text=&theme={theme}&page={page}{EXTRA_PARAMS}"
+            url = f"{BASE_URL}/en/card/?search_type=name&search_text=&theme={theme}&page={page}{FILTER_PARAMS}"
             if not allowed(rp, url, USER_AGENT):
                 print(f"[faction] robots.txt disallows {url}; skipping theme {theme}")
                 break
@@ -465,7 +470,7 @@ def merge_all_cards(faction_by_id: dict[str, str] | None = None,
 # Main
 # ---------------------------------------------------------------------------
 def main() -> int:
-    global MIN_INTERVAL, SKIP_IMAGES, INCLUDE_UNCOLLECTABLE, EXTRA_PARAMS
+    global MIN_INTERVAL, SKIP_IMAGES, INCLUDE_UNCOLLECTABLE, LIST_PARAMS, FILTER_PARAMS
     global DATA_DIR, IMAGE_DIR, STATE_FILE, MERGED_JSON, FACTION_REPORT_JSON
 
     ap = argparse.ArgumentParser(description="Polite Kana card crawler")
@@ -491,7 +496,12 @@ def main() -> int:
     MIN_INTERVAL = args.delay
     SKIP_IMAGES = args.skip_images
     INCLUDE_UNCOLLECTABLE = args.include_uncollectable
-    EXTRA_PARAMS = "&etc=uncollectable" if INCLUDE_UNCOLLECTABLE else ""
+    if INCLUDE_UNCOLLECTABLE:
+        LIST_PARAMS = "search_type=name&search_text=&etc=uncollectable&tab=etc&deck_tab=edit"
+        FILTER_PARAMS = "&etc=uncollectable"
+    else:
+        LIST_PARAMS = ""
+        FILTER_PARAMS = ""
     LIMITER.min_interval = MIN_INTERVAL
 
     if INCLUDE_UNCOLLECTABLE:
