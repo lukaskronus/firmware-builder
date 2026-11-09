@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
 Usage:
-python kana_scraper.py                 # normal run (resumable)
-python kana_scraper.py --dry-run       # list what would be fetched
-python kana_scraper.py --force         # re-download everything
-python kana_scraper.py --workers 2     # override worker count
-python kana_scraper.py --skip-images   # skip downloading images
-python kana_scraper.py --delay 0.5     # override delay
+python kana_scraper.py                          # official/collectable run (resumable)
+python kana_scraper.py --include-uncollectable  # also crawl uncollectable/event/token cards
+python kana_scraper.py --dry-run                # list what would be fetched
+python kana_scraper.py --force                  # re-download everything
+python kana_scraper.py --workers 2              # override worker count
+python kana_scraper.py --skip-images            # skip downloading images
+python kana_scraper.py --delay 0.5              # override delay
 """
 import argparse
 import json
@@ -38,6 +39,8 @@ BACKOFF_MAX  = 60.0
 MAX_CONSECUTIVE_FAILS = 8   # give up on a URL after this many in a row
 
 SKIP_IMAGES = False         # Controlled via CLI
+INCLUDE_UNCOLLECTABLE = False
+EXTRA_PARAMS = ""            # e.g. "&etc=uncollectable"
 
 HEADERS = {
     "User-Agent": USER_AGENT,
@@ -197,7 +200,7 @@ def looks_like_webp(data: bytes) -> bool:
 # Discovery
 # ---------------------------------------------------------------------------
 def get_max_pages(session: requests.Session, rp: urllib.robotparser.RobotFileParser) -> int:
-    url = f"{BASE_URL}/en/card/"
+    url = f"{BASE_URL}/en/card/?tab=detail{EXTRA_PARAMS}"
     if not allowed(rp, url, USER_AGENT):
         raise SystemExit(f"[robots] disallowed: {url}")
     r = fetch(session, url)
@@ -215,7 +218,7 @@ def get_card_ids(session: requests.Session, rp: urllib.robotparser.RobotFilePars
                  max_pages: int) -> list[str]:
     ids: set[str] = set()
     for page in range(1, max_pages + 1):
-        url = f"{BASE_URL}/en/card/?page={page}"
+        url = f"{BASE_URL}/en/card/?page={page}{EXTRA_PARAMS}"
         if not allowed(rp, url, USER_AGENT):
             print(f"[robots] skipping disallowed page {page}")
             continue
@@ -372,7 +375,7 @@ def crawl_factions(session: requests.Session,
         page_total = None
         theme_count = 0
         while True:
-            url = f"{BASE_URL}/en/card/?search_type=name&search_text=&theme={theme}&page={page}"
+            url = f"{BASE_URL}/en/card/?search_type=name&search_text=&theme={theme}&page={page}{EXTRA_PARAMS}"
             if not allowed(rp, url, USER_AGENT):
                 print(f"[faction] robots.txt disallows {url}; skipping theme {theme}")
                 break
@@ -412,7 +415,7 @@ def merge_all_cards(faction_by_id: dict[str, str] | None = None,
     all_cards = []
     if os.path.exists(DATA_DIR):
         for filename in sorted(os.listdir(DATA_DIR)):
-            if filename.endswith(".json") and filename != MERGED_JSON:
+            if filename.endswith(".json") and filename not in {MERGED_JSON, "uncollectable_only.json"}:
                 filepath = os.path.join(DATA_DIR, filename)
                 try:
                     with open(filepath, "r", encoding="utf-8") as f:
@@ -438,6 +441,8 @@ def merge_all_cards(faction_by_id: dict[str, str] | None = None,
         "unknown": unknown,
         "conflicts": conflicts or [],
         "total_cards": len(all_cards),
+        "uncollectable_cards": sum(1 for c in all_cards if c.get("uncollectable")),
+        "include_uncollectable": INCLUDE_UNCOLLECTABLE,
     }
     with open(FACTION_REPORT_JSON, "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
@@ -449,11 +454,19 @@ def merge_all_cards(faction_by_id: dict[str, str] | None = None,
         json.dump(all_cards, f, ensure_ascii=False, indent=2)
     print(f"[merge] saved {len(all_cards)} cards to {merged_path}")
 
+    if INCLUDE_UNCOLLECTABLE:
+        uncollectable = [c for c in all_cards if c.get("uncollectable")]
+        only_path = os.path.join(DATA_DIR, "uncollectable_only.json")
+        with open(only_path, "w", encoding="utf-8") as f:
+            json.dump(uncollectable, f, ensure_ascii=False, indent=2)
+        print(f"[merge] saved {len(uncollectable)} uncollectable/event/token cards to {only_path}")
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main() -> int:
-    global MIN_INTERVAL, SKIP_IMAGES
+    global MIN_INTERVAL, SKIP_IMAGES, INCLUDE_UNCOLLECTABLE, EXTRA_PARAMS
+    global DATA_DIR, IMAGE_DIR, STATE_FILE, MERGED_JSON, FACTION_REPORT_JSON
 
     ap = argparse.ArgumentParser(description="Polite Kana card crawler")
     ap.add_argument("--workers", type=int, default=2,
@@ -466,11 +479,33 @@ def main() -> int:
                     help="discover cards but do not download")
     ap.add_argument("--skip-images", action="store_true",
                     help="skip downloading card images to save bandwidth")
+    ap.add_argument("--include-uncollectable", action="store_true",
+                    help="include uncollectable/event/token cards (etc=uncollectable)")
+    ap.add_argument("--data-dir", default=None, help="override JSON data directory")
+    ap.add_argument("--image-dir", default=None, help="override image directory")
+    ap.add_argument("--state-file", default=None, help="override resumable state file")
+    ap.add_argument("--merged-name", default=None, help="override merged JSON filename (inside data dir)")
+    ap.add_argument("--faction-report", default=None, help="override faction report path")
     args = ap.parse_args()
 
     MIN_INTERVAL = args.delay
     SKIP_IMAGES = args.skip_images
+    INCLUDE_UNCOLLECTABLE = args.include_uncollectable
+    EXTRA_PARAMS = "&etc=uncollectable" if INCLUDE_UNCOLLECTABLE else ""
     LIMITER.min_interval = MIN_INTERVAL
+
+    if INCLUDE_UNCOLLECTABLE:
+        DATA_DIR = args.data_dir or "kana_db_data_uncollectable"
+        IMAGE_DIR = args.image_dir or "kana_db_images"  # share assets
+        STATE_FILE = args.state_file or "kana_db_state_uncollectable.json"
+        MERGED_JSON = args.merged_name or "all_cards_with_uncollectable.json"
+        FACTION_REPORT_JSON = args.faction_report or "faction_report_uncollectable.json"
+    else:
+        DATA_DIR = args.data_dir or "kana_db_data"
+        IMAGE_DIR = args.image_dir or "kana_db_images"
+        STATE_FILE = args.state_file or "kana_db_state.json"
+        MERGED_JSON = args.merged_name or "all_cards.json"
+        FACTION_REPORT_JSON = args.faction_report or "faction_report.json"
 
     os.makedirs(DATA_DIR, exist_ok=True)
     os.makedirs(IMAGE_DIR, exist_ok=True)
