@@ -7,6 +7,15 @@ concurrency:
 on:
   workflow_dispatch:
     inputs:
+      mode:
+        description: 'What to crawl: official, uncollectable, or both'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - both
+          - official
+          - uncollectable
       delay:
         description: 'Minimum seconds between requests (be polite: 0.5+)'
         required: true
@@ -57,45 +66,69 @@ jobs:
         with:
           path: |
             kana_db_state.json
+            kana_db_state_uncollectable.json
             kana_db_data/
+            kana_db_data_uncollectable/
             kana_db_images/
+            faction_report.json
+            faction_report_uncollectable.json
           key: kanadb-full-${{ github.run_id }}
           restore-keys: |
             kanadb-full-
 
       - name: Run crawler
         run: |
+          set -euo pipefail
           ARGS=""
           ARGS="$ARGS --delay ${{ github.event.inputs.delay }}"
           ARGS="$ARGS --workers ${{ github.event.inputs.workers }}"
           if [ "${{ github.event.inputs.force }}" = "true" ]; then ARGS="$ARGS --force"; fi
           if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
           if [ "${{ github.event.inputs.skip_images }}" = "true" ]; then ARGS="$ARGS --skip-images"; fi
-          echo "Running: python scripts/kana_scraper.py $ARGS"
-          python scripts/kana_scraper.py $ARGS
+          MODE="${{ github.event.inputs.mode }}"
+          if [ "$MODE" = "both" ] || [ "$MODE" = "official" ]; then
+            echo "Running official: python scripts/kana_scraper.py $ARGS"
+            python scripts/kana_scraper.py $ARGS
+          fi
+          if [ "$MODE" = "both" ] || [ "$MODE" = "uncollectable" ]; then
+            echo "Running uncollectable: python scripts/kana_scraper.py $ARGS --include-uncollectable"
+            python scripts/kana_scraper.py $ARGS --include-uncollectable
+          fi
 
       - name: Ensure output directories exist
         if: always()
         run: |
-          mkdir -p kana_db_data kana_db_images
-          echo "JSON files:  $(ls kana_db_data | wc -l)"
-          echo "Image files: $(ls kana_db_images | wc -l)"
+          mkdir -p kana_db_data kana_db_data_uncollectable kana_db_images
+          echo "Official JSON files:      $(ls kana_db_data 2>/dev/null | wc -l)"
+          echo "Uncollectable JSON files: $(ls kana_db_data_uncollectable 2>/dev/null | wc -l)"
+          echo "Image files:              $(ls kana_db_images 2>/dev/null | wc -l)"
 
-      - name: Upload JSON data
-        if: always()
+      - name: Upload official JSON data
+        if: always() && (github.event.inputs.mode == 'both' || github.event.inputs.mode == 'official')
         uses: actions/upload-artifact@v7
         with:
-          name: kanadb-json-data
+          name: kanadb-official-json
           path: kana_db_data/
           if-no-files-found: warn
           retention-days: 7
 
-      - name: Upload faction report
+      - name: Upload uncollectable JSON data
+        if: always() && (github.event.inputs.mode == 'both' || github.event.inputs.mode == 'uncollectable')
+        uses: actions/upload-artifact@v7
+        with:
+          name: kanadb-uncollectable-json
+          path: kana_db_data_uncollectable/
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Upload faction reports
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: kanadb-faction-report
-          path: faction_report.json
+          name: kanadb-faction-reports
+          path: |
+            faction_report.json
+            faction_report_uncollectable.json
           if-no-files-found: warn
           retention-days: 7
 
