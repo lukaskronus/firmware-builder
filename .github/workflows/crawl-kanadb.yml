@@ -1,7 +1,7 @@
-name: Crawl KanaDB Cards (Async)
+name: Crawl KanaDB Cards
 
 concurrency:
-  group: kanadb-crawl-async
+  group: kanadb-crawl
   cancel-in-progress: false
 
 on:
@@ -16,12 +16,20 @@ on:
           - both
           - official
           - uncollectable
-      delay:
-        description: 'Minimum seconds between requests (be polite: 0.2+ for async)'
+      concurrency:
+        description: 'Max simultaneous in-flight requests (5 is safe for a shared host)'
         required: true
-        default: '0.3'
+        default: '5'
+      delay:
+        description: 'Optional per-worker floor between requests, seconds (0 = none)'
+        required: true
+        default: '0'
       force:
         description: 'Re-download everything, ignoring cached state'
+        type: boolean
+        default: false
+      refresh_stale:
+        description: 'Re-fetch cached cards whose schema_version is outdated'
         type: boolean
         default: false
       dry_run:
@@ -39,7 +47,7 @@ permissions:
 jobs:
   crawl:
     runs-on: ubuntu-latest
-    timeout-minutes: 180 # Increased timeout for full enhancement chain scraping
+    timeout-minutes: 60
 
     steps:
       - name: Checkout repository
@@ -49,71 +57,131 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: '3.11'
+          cache: 'pip'
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install aiohttp==3.9.5 beautifulsoup4==4.12.3
+          pip install requests beautifulsoup4
 
-      # Cache the output files and state
+      # Cache per-card JSONs, images, and resumable state.
+      # Stable prefix so restore-keys actually hits across runs.
       - name: Restore crawl state and data
         uses: actions/cache@v6
         with:
           path: |
             kana_db_data/
-            all_cards_official.json
-            all_cards_uncollectable.json
-          key: kanadb-async-${{ github.run_id }}
+            kana_db_data_uncollectable/
+            kana_db_images/
+            kana_db_state.json
+            kana_db_state_uncollectable.json
+            faction_report.json
+            faction_report_uncollectable.json
+          key: kanadb-v3-${{ github.run_id }}
           restore-keys: |
-            kanadb-async-
+            kanadb-v3-
+
+      - name: Build common flags
+        id: flags
+        run: |
+          FLAGS="--concurrency ${{ github.event.inputs.concurrency }} --delay ${{ github.event.inputs.delay }}"
+          if [ "${{ github.event.inputs.force }}" = "true" ]; then
+            FLAGS="$FLAGS --force"
+          fi
+          if [ "${{ github.event.inputs.refresh_stale }}" = "true" ]; then
+            FLAGS="$FLAGS --refresh-stale"
+          fi
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            FLAGS="$FLAGS --dry-run"
+          fi
+          if [ "${{ github.event.inputs.skip_images }}" = "true" ]; then
+            FLAGS="$FLAGS --skip-images"
+          fi
+          echo "flags=$FLAGS" >> "$GITHUB_OUTPUT"
+          echo "Effective flags: $FLAGS"
 
       - name: Run crawler (Official)
         if: github.event.inputs.mode == 'both' || github.event.inputs.mode == 'official'
         run: |
           set -euo pipefail
-          echo "Running Official Crawler..."
-          # Note: Update your Python script to accept CLI args or modify the script's 
-          # INCLUDE_UNCOLLECTABLE = False line directly if needed.
-          # For this example, we assume you pass args or modify the script.
-          # If using the script provided earlier, you might need to pass args like:
-          python scripts/kana_scraper_async.py --mode official --delay ${{ github.event.inputs.delay }}
-          
+          echo "::group::Official crawl"
+          python scripts/kana_scraper.py ${{ steps.flags.outputs.flags }}
+          echo "::endgroup::"
+
       - name: Run crawler (Uncollectable)
         if: github.event.inputs.mode == 'both' || github.event.inputs.mode == 'uncollectable'
         run: |
           set -euo pipefail
-          echo "Running Uncollectable Crawler..."
-          python scripts/kana_scraper_async.py --mode uncollectable --delay ${{ github.event.inputs.delay }}
+          echo "::group::Uncollectable crawl"
+          python scripts/kana_scraper.py --include-uncollectable ${{ steps.flags.outputs.flags }}
+          echo "::endgroup::"
 
-      - name: Ensure output directories exist
+      - name: Report output summary
         if: always()
         run: |
-          mkdir -p kana_db_data
-          echo "Total JSON files: $(ls kana_db_data/*.json 2>/dev/null | wc -l)"
+          {
+            echo "### Crawl output summary"
+            echo ""
+            echo "| File | Size | Entries |"
+            echo "|---|---|---|"
+            for f in \
+              kana_db_data/all_cards.json \
+              kana_db_data_uncollectable/all_cards_with_uncollectable.json \
+              faction_report.json \
+              faction_report_uncollectable.json
+            do
+              if [ -f "$f" ]; then
+                size=$(du -h "$f" | cut -f1)
+                count=$(python -c "import json; d=json.load(open('$f')); print(len(d) if isinstance(d,list) else d.get('total_cards','n/a'))" 2>/dev/null || echo '?')
+                echo "| \`$f\` | $size | $count |"
+              fi
+            done
+            echo ""
+            echo "Per-card JSONs: $(ls kana_db_data/*.json 2>/dev/null | wc -l)"
+            echo "Images cached:  $(ls kana_db_images/*.webp 2>/dev/null | wc -l)"
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload Official JSON
+      - name: Upload Official master JSON
         if: always() && (github.event.inputs.mode == 'both' || github.event.inputs.mode == 'official')
         uses: actions/upload-artifact@v7
         with:
-          name: kanadb-official-json-async
-          path: all_cards_official.json
+          name: kanadb-official-json
+          path: |
+            kana_db_data/all_cards.json
+            faction_report.json
           if-no-files-found: warn
           retention-days: 7
 
-      - name: Upload Uncollectable JSON
+      - name: Upload Uncollectable master JSON
         if: always() && (github.event.inputs.mode == 'both' || github.event.inputs.mode == 'uncollectable')
         uses: actions/upload-artifact@v7
         with:
-          name: kanadb-uncollectable-json-async
-          path: all_cards_uncollectable.json
+          name: kanadb-uncollectable-json
+          path: |
+            kana_db_data_uncollectable/all_cards_with_uncollectable.json
+            kana_db_data_uncollectable/uncollectable_only.json
+            faction_report_uncollectable.json
           if-no-files-found: warn
           retention-days: 7
 
-      - name: Upload Individual Card Data
+      - name: Upload individual card JSONs
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: kanadb-individual-cards
-          path: kana_db_data/
+          path: |
+            kana_db_data/
+            kana_db_data_uncollectable/
           if-no-files-found: warn
           retention-days: 7
+
+      - name: Upload resumable state
+        if: always() && github.event.inputs.dry_run != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: kanadb-state
+          path: |
+            kana_db_state.json
+            kana_db_state_uncollectable.json
+          if-no-files-found: warn
+          retention-days: 1
