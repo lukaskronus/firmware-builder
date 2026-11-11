@@ -109,16 +109,13 @@ class Config:
     filter_params: str = ""
 
     def apply_uncollectable(self) -> None:
+        """Switch only the query params. Paths are handled in parse_args()."""
         if not self.include_uncollectable:
             return
         self.list_params = (
             "search_type=name&search_text=&etc=uncollectable&tab=etc&deck_tab=edit"
         )
         self.filter_params = "&etc=uncollectable"
-        self.data_dir = self.data_dir or "kana_db_data_uncollectable"
-        self.state_file = self.state_file or "kana_db_state_uncollectable.json"
-        self.merged_name = self.merged_name or "all_cards_with_uncollectable.json"
-        self.faction_report = self.faction_report or "faction_report_uncollectable.json"
 
 # ===========================================================================
 # Concurrency gate
@@ -846,14 +843,10 @@ def run(cfg: Config) -> int:
 # ===========================================================================
 def parse_args(argv: list[str] | None = None) -> Config:
     ap = argparse.ArgumentParser(description="Kana card crawler (concurrency-gated)")
-    ap.add_argument("--concurrency", type=int, default=5,
-                    help="max simultaneous in-flight requests (default 5)")
-    ap.add_argument("--delay", type=float, default=0.0,
-                    help="optional per-worker floor between requests (default 0)")
-    ap.add_argument("--force", action="store_true",
-                    help="ignore cache entirely and re-download everything")
-    ap.add_argument("--refresh-stale", action="store_true",
-                    help="re-fetch cached cards whose schema_version is below current")
+    ap.add_argument("--concurrency", type=int, default=5)
+    ap.add_argument("--delay", type=float, default=0.0)
+    ap.add_argument("--force", action="store_true")
+    ap.add_argument("--refresh-stale", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--skip-images", action="store_true")
     ap.add_argument("--include-uncollectable", action="store_true")
@@ -874,6 +867,18 @@ def parse_args(argv: list[str] | None = None) -> Config:
         skip_images=args.skip_images,
         include_uncollectable=args.include_uncollectable,
     )
+
+    # Choose uncollectable defaults ONLY when the user did not override the path.
+    if args.include_uncollectable:
+        if not args.data_dir:
+            cfg.data_dir = "kana_db_data_uncollectable"
+        if not args.state_file:
+            cfg.state_file = "kana_db_state_uncollectable.json"
+        if not args.merged_name:
+            cfg.merged_name = "all_cards_with_uncollectable.json"
+        if not args.faction_report:
+            cfg.faction_report = "faction_report_uncollectable.json"
+
     if args.data_dir:
         cfg.data_dir = args.data_dir
     if args.image_dir:
