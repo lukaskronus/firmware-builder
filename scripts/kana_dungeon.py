@@ -20,40 +20,45 @@ async def main():
         floors = []
         current_dungeons = []
         current_difficulty = ""
-        floor_regex = re.compile(r'^\d+F$')
-        # Matches "EP0 Administration Bureau" -> Group 1: "EP0", Group 2: "Administration Bureau"
+        # Matches standard floors AND special floor identifiers
+        floor_regex = re.compile(
+            r'^(\d+F|[A-Z]-Lab|Beach \w+|Transcendental Observer|'
+            r'Beginner Observer|Loner Observer|Collector Observer|'
+            r'Duelist Observer|Manager Observer)$'
+        )
         episode_regex = re.compile(r'^(EP\d+|EV\d+)\s+(.*)$')
 
         for i, tr in enumerate(rows):
             th_section = tr.find('th', class_='npc-catalog__section')
             if th_section:
-                next_tr = rows[i+1]
+                next_tr = rows[i + 1]
                 ths = next_tr.find_all('th')
                 if ths:
                     current_dungeons = [th.text.strip().replace('\n', ' ') for th in ths]
                 continue
-                
+
             td_difficulty = tr.find('td', class_='npc-catalog__difficulty')
             if td_difficulty:
                 current_difficulty = td_difficulty.text.strip()
                 continue
-                
+
             tds = tr.find_all('td')
             if tds and not td_difficulty:
                 for j, td in enumerate(tds):
                     links = td.find_all('a')
                     if links:
                         for a in links:
-                            link_text = a.text.strip()
+                            link_text = a.text.strip().replace('\n', ' ')
                             
-                            if floor_regex.match(link_text):
+                            is_floor = bool(floor_regex.match(link_text))
+                            
+                            if is_floor:
                                 raw_name = current_dungeons[j] if j < len(current_dungeons) else "Unknown"
                                 floor_name = link_text
                             else:
-                                raw_name = link_text.replace('\n', ' ').strip()
+                                raw_name = link_text
                                 floor_name = "1F"
-                                
-                            # Split episode and dungeon name
+
                             episode_match = episode_regex.match(raw_name)
                             if episode_match:
                                 episode = episode_match.group(1)
@@ -61,7 +66,7 @@ async def main():
                             else:
                                 episode = ""
                                 dungeon = raw_name
-                                
+
                             floors.append({
                                 "episode": episode,
                                 "dungeon": dungeon,
@@ -78,16 +83,36 @@ async def main():
                 async with session.get(full_url) as response:
                     html = await response.text()
                     soup = BeautifulSoup(html, 'html.parser')
-                    cards = soup.find_all('div', class_='card-tile--compact')
+                    
+                    # 1. Extract regular deck cards (with counts)
                     cards_data = {}
-                    for card in cards:
-                        card_id = card.get('data-card-id')
-                        count_el = card.find('div', class_='card-tile__count-value')
-                        if card_id and count_el:
-                            cards_data[card_id] = int(count_el.text.strip())
-                    return {**floor_info, "cards": cards_data}
+                    deck_container = soup.find('div', class_='deck-summary__cards')
+                    if deck_container:
+                        regular_cards = deck_container.find_all('div', class_='card-tile--compact')
+                        for card in regular_cards:
+                            card_id = card.get('data-card-id')
+                            count_el = card.find('div', class_='card-tile__count-value')
+                            if card_id and count_el:
+                                cards_data[card_id] = int(count_el.text.strip())
+                    
+                    # 2. Extract boss/character card separately
+                    character_card = None
+                    boss_el = soup.find('div', class_='card-tile--character')
+                    if boss_el:
+                        character_card = boss_el.get('data-card-id')
+                            
+                    return {
+                        **floor_info, 
+                        "character_card": character_card,
+                        "cards": cards_data
+                    }
             except Exception as e:
-                return {**floor_info, "cards": {}, "error": str(e)}
+                return {
+                    **floor_info, 
+                    "character_card": None, 
+                    "cards": {}, 
+                    "error": str(e)
+                }
 
         results = []
         for i, floor in enumerate(floors):
