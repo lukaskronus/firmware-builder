@@ -1,0 +1,33 @@
+name: Export Kanatales dungeons
+
+on:
+  workflow_dispatch:
+
+jobs:
+  export-npc-data:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+          
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install aiohttp beautifulsoup4
+          
+      - name: Run NPC Export Script
+        run: python scripts/kana_dungeon.py
+        
+      - name: Upload JSON Artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: npc-dungeons-json
+          path: npc_dungeons.json
+          retention-days: 7
